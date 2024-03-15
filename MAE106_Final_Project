@@ -1,0 +1,238 @@
+#include <Servo.h>
+#include <Wire.h>
+#include <LIS3MDL.h>
+#include <LSM6.h>
+
+
+// setup for magnetometer //
+LIS3MDL mag;
+LSM6 imu;
+
+// min: {-11259,  -2660, -11056}   max: { -8323,  -1206,  -5473}
+// V2 min: {-11684,  -2676, -12906}   max: { -7726,  +1024,  -6572}
+// V3 min: {-11931,  -2775, -13026}   max: { -7539,  +2793,  -6369}
+LIS3MDL::vector<int16_t> m_min = {-11931,  -2775, -13026};
+LIS3MDL::vector<int16_t> m_max = {-7539,  +2793,  -6369};
+
+int servoPin = 3;                   // Pin that the servomotor is connected to
+int solenoidPin = 2;                // Pin that the mosfet is connected to
+const int reedSwitchPin = 4;        // Pin that the switch is connected to
+int pos = 0;                        // variable to store the servo position
+// int switchState;                    // variable that stores the Reed switch state
+int servoDir = 0;                   // variable that stores the direction the motor is turning in the demo program
+int solenoidState = LOW;            // variable that stores if solenoid is on or off         
+const long interval = 700;         // interval at which to turn solenoid on and off (milliseconds)
+volatile unsigned int counter = -1; // counts how many times reed switch is triggered
+int lastReedState = HIGH;           // records last state
+float distance_traveled = 0;        // tracks total distance traveled
+float prevFilteredDerivative = 0;
+
+float v[5] = {0.0};
+
+///////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// setup for servo ///////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+// PD Controller parameters
+float Kp = 1; // Proportional gain
+float Kd = 0;   // Derivative gain
+float Ki = 0; // Integral gain
+Servo myservo;  // Create servo object to control a servo
+
+float totalError = 0; // Accumulator for the integral term
+float error = 0; // Current error
+float integral = 0; // Integral term calculation
+
+// Time variables
+unsigned long currentMillis = 0;
+unsigned long previousMillis = 0;   // will store last time servo was updated
+unsigned long previousMillisSol = 0;   // will store last time solenoid was updated
+
+// Heading variables
+float initialHeading = 0;
+float currentHeading = 0;
+float previousHeading = 0;
+float desiredHeading = 0; // Example desired heading in degrees
+
+
+
+void setup() {
+  myservo.attach(servoPin);                   // attaches the servo on pin 9 to the servo object
+  pinMode(solenoidPin, OUTPUT);               // Sets the pin as an output
+  lastReedState = digitalRead(reedSwitchPin); // records last switch state
+  pinMode(reedSwitchPin, INPUT_PULLUP);       // Sets the pin as an input_pullup
+  Serial.begin(9600);                         // starts serial communication @ 9600 bps
+  Wire.begin();
+
+  if (!mag.init())
+  {
+    Serial.println("Failed to detect and initialize LIS3MDL magnetometer!");
+    while (1);
+  }
+  mag.enableDefault();
+
+  if (!imu.init())
+  {
+    Serial.println("Failed to detect and initialize LSM6 IMU!");
+    while (1);
+  }
+  imu.enableDefault();
+
+  myservo.write(35);
+
+//////////
+  v[0] = 0;
+  v[1]= 0;
+  v[2] = 0;
+  v[3] = 0;
+  v[4] = 0;
+
+}
+  
+
+
+void loop() {
+////////////// MAGNETOMETER ///////////////////////////////////////////////////
+  currentMillis = millis();
+  mag.read();
+  imu.read();
+
+  float heading = computeHeading();
+
+  if (currentMillis <= 1000) {
+    initialHeading = computeHeading();
+  }
+
+
+////////////// REED SWITCH ///////////////////////////////////////////////////
+int currentReedState = digitalRead(reedSwitchPin);
+
+  // Check if the switch has transitioned from HIGH to LOW (switch clicked)
+  if (lastReedState == HIGH && currentReedState == LOW) {
+    // Increment the counter
+    counter++;
+    distance_traveled = counter*0.721; // units: feet
+
+    // Print the current count to the Serial Monitor
+    Serial.print("Current count: ");
+    Serial.println(counter);
+    Serial.print("Distance Traveled: ");
+    Serial.println(distance_traveled);
+  }
+
+  // Update the lastReedState with the current state for the next loop iteration
+  lastReedState = currentReedState;
+
+  // Small delay to debounce
+  delay(50);
+
+
+////////////// SERVOMOTOR ///////////////////////////////////////////////////
+  
+  if (currentMillis - previousMillis >= 100) { // Update every 100 milliseconds
+    currentHeading = heading;
+
+    float error = initialHeading - currentHeading;
+
+    totalError += error * (currentMillis - previousMillis);
+    integral = Ki * totalError;
+
+    
+    float currentDerivative = (currentHeading - previousHeading) / (currentMillis - previousMillis);
+
+    float alpha = 0.5; // Filter coefficient, adjust based on desired filtering effect
+    float filteredDerivative = lowPassFilter(currentDerivative, prevFilteredDerivative, alpha);
+    
+    // Calculate control input
+    float pos = Kp * error + integral - Kd * filteredDerivative;
+    
+    // Apply control input to the servo
+    if (pos > 50){
+      pos = 50;
+      myservo.write(-0.75*pos+45);
+    }
+    else if (pos < -50) {
+      pos = -50;
+      myservo.write(-0.75*pos+45);
+    }
+    else {
+      myservo.write(-0.75*pos+45);
+    }
+    
+    // Update time and heading for the next iteration
+    previousMillis = currentMillis;
+    previousHeading = currentHeading;
+
+  }
+
+////////////// SOLENOID VALVE ///////////////////////////////////////////////////
+
+  if (currentMillis - previousMillisSol >= interval) {
+    previousMillisSol = currentMillis;
+    if (solenoidState == LOW) {
+      solenoidState = HIGH;
+    } else {
+      solenoidState = LOW;
+    }
+    digitalWrite(solenoidPin, solenoidState);    //Switch Solenoid ON/oFF
+  }
+
+////////////// Serial Print  ///////////////////////////////////////////////////
+  Serial.print("   Magnetometer: ");
+  Serial.println(heading);
+
+  Serial.print("   Current count: ");
+  Serial.print(counter);
+
+  Serial.print("   Distance Traveled: ");
+  Serial.print(distance_traveled);
+
+  Serial.print("     Test:   ");
+  Serial.print(initialHeading);
+
+}
+
+
+
+
+//heading function for magnetometer
+
+template <typename T> float computeHeading(LIS3MDL::vector<T> from)
+{
+  LIS3MDL::vector<int32_t> temp_m = {mag.m.x, mag.m.y, mag.m.z};
+
+  // copy acceleration readings from LSM6::vector into an LIS3MDL::vector
+  LIS3MDL::vector<int16_t> a = {imu.a.x, imu.a.y, imu.a.z};
+
+  // subtract offset (average of min and max) from magnetometer readings
+  temp_m.x -= ((int32_t)m_min.x + m_max.x) / 2;
+  temp_m.y -= ((int32_t)m_min.y + m_max.y) / 2;
+  temp_m.z -= ((int32_t)m_min.z + m_max.z) / 2;
+
+  // compute E and N
+  LIS3MDL::vector<float> E;
+  LIS3MDL::vector<float> N;
+  LIS3MDL::vector_cross(&temp_m, &a, &E);
+  LIS3MDL::vector_normalize(&E);
+  LIS3MDL::vector_cross(&a, &E, &N);
+  LIS3MDL::vector_normalize(&N);
+
+  // compute heading
+  float heading = atan2(LIS3MDL::vector_dot(&E, &from), LIS3MDL::vector_dot(&N, &from)) * 180 / PI;
+  if (heading < 0) heading += 360;
+  return heading;
+}
+
+/*
+Returns the angular difference in the horizontal plane between a
+default vector (the +X axis) and north, in degrees.
+*/
+float computeHeading()
+{
+  return computeHeading((LIS3MDL::vector<int>){1, 0, 0});
+}
+
+
+float lowPassFilter(float currentInput, float prevOutput, float alpha) {
+    return alpha * currentInput + (1 - alpha) * prevOutput;
+}
